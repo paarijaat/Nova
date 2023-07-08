@@ -1,8 +1,8 @@
 #![allow(non_snake_case)]
 #![feature(test)]
-#![deny(missing_docs)]
-#![feature(external_doc)]
-#![doc(include = "../README.md")]
+// #![deny(missing_docs)]
+// #![feature(external_doc)]
+// #![doc(include = "../README.md")]
 
 extern crate core;
 extern crate curve25519_dalek;
@@ -62,6 +62,7 @@ impl StepSNARK {
     let U = U1.fold(U2, &comm_T, &r)?;
 
     // fold the witness using `r` and `T`
+    // i.e., fold W and E
     let W = W1.fold(W2, &T, &r)?;
 
     // return the folded instance and witness
@@ -137,13 +138,19 @@ mod tests {
       // Relaxed R1CS is a set of three sparse matrices (A B C), where there is a row for every
       // constraint and a column for every entry in z = (vars, u, inputs)
       // An R1CS instance is satisfiable iff:
-      // Az \circ Bz = u \cdot Cz + E, where z = (vars, 1, inputs)
+      // Az \circ Bz = u \cdot Cz + E, where z = (vars, u, inputs)
+      // Az * Bz = u*Cz + E    here z is the concat of (num_vars, u, num_inputs)
+
+      // Matrix structure: let (row, col, _val) = M[i];
+      // row < num_constraints && col <= num_inputs + num_vars,   Note there is constant One in each row
+      // Each row = (vars, 1, inputs)   // input refers to both public output and public input, vars refers to all wires including private input
+      //          = (Z0,Z1,Z2,...Z_(num_vars-1), 1, I0,I1,...I_(num_inputs-1))
       let mut A: Vec<(usize, usize, Scalar)> = Vec::new();
       let mut B: Vec<(usize, usize, Scalar)> = Vec::new();
       let mut C: Vec<(usize, usize, Scalar)> = Vec::new();
 
       // constraint 0 entries in (A,B,C)
-      A.push((0, 0, one));
+      A.push((0, 0, one));  // Row 0, Col 0 is set to Scaler One
       B.push((0, 0, one));
       C.push((0, 1, one));
 
@@ -167,6 +174,8 @@ mod tests {
       (num_cons, num_vars, num_inputs, A, B, C)
     };
 
+    // R1CSShape stores the R1CS A,B,C matrices and also a count for the 
+    // number of constraints and variables and number of public I/O
     // create a shape object
     let S = {
       let res = R1CSShape::new(num_cons, num_vars, num_inputs, &A, &B, &C);
@@ -174,6 +183,9 @@ mod tests {
       res.unwrap()
     };
 
+    // R1CSGens is used to store the elliptic curve points required to create commitments
+    // Two types of commitments are needed: 1) Witness vector (of size num_vars)
+    //                                      2) Error vector (of size num_constraints)
     // generate generators
     let gens = R1CSGens::new(num_cons, num_vars);
 
@@ -192,12 +204,25 @@ mod tests {
         (vars, X)
       };
 
-      let W = {
+      // R1CSWitness = Relaxed R1CS witness
+      // Contains: 
+      //          1) wire values (num_vars) (of extended circuit)  
+      //          2) Error vector (num_cons)  (default value all zeros)
+      let W: R1CSWitness = {
         let E = vec![Scalar::zero(); num_cons]; // default E
         let res = R1CSWitness::new(&S, &vars, &E);
         assert!(res.is_ok());
         res.unwrap()
       };
+
+      // R1CSInstance = Committed Relaxed R1CS instance = public values of relaxed R1CS instance
+      // Contains: 
+      //          1) Commitment to wire values 
+      //          2) Commitment to Error vector
+      //          3) constant u (of relaxed R1CS instance - which is multiplied to the matrix vector product of (C.z))
+      //                        default value 1
+      //          4) public I/O (num_inputs)
+
       let U = {
         let (comm_W, comm_E) = W.commit(&gens);
         let u = Scalar::one(); //default u
@@ -207,6 +232,7 @@ mod tests {
       };
 
       // check that generated instance is satisfiable
+      // Az * Bz = u*Cz + E    here z is the concat of (num_vars, 1, num_inputs)
       let is_sat = S.is_sat(&gens, &U, &W);
       assert!(is_sat.is_ok());
       (U, W)
@@ -214,27 +240,54 @@ mod tests {
 
     let (U1, W1) = rand_inst_witness_generator(&gens);
     let (U2, W2) = rand_inst_witness_generator(&gens);
+    let (U3, W3) = rand_inst_witness_generator(&gens);
 
+    // StepSNARK contains commitment to T  (that is used to compute E)
     // produce a step SNARK
     let mut prover_transcript = Transcript::new(b"StepSNARKExample");
     let res = StepSNARK::prove(&gens, &S, &U1, &W1, &U2, &W2, &mut prover_transcript);
     assert!(res.is_ok());
-    let (step_snark, (_U, W)) = res.unwrap();
+    let (step_snark, (U_fold1, W_fold1)) = res.unwrap();
 
     // verify the step SNARK
     let mut verifier_transcript = Transcript::new(b"StepSNARKExample");
     let res = step_snark.verify(&U1, &U2, &mut verifier_transcript);
     assert!(res.is_ok());
-    let U = res.unwrap();
+    let U_verifier_fold1 = res.unwrap();
 
-    assert_eq!(U, _U);
+    assert_eq!(U_verifier_fold1, U_fold1);
 
     // produce a final SNARK
-    let res = FinalSNARK::prove(&W);
+    let res = FinalSNARK::prove(&W_fold1);
     assert!(res.is_ok());
     let final_snark = res.unwrap();
     // verify the final SNARK
-    let res = final_snark.verify(&gens, &S, &U);
+    let res = final_snark.verify(&gens, &S, &U_verifier_fold1);
+    assert!(res.is_ok());
+
+
+    ///////////////// 
+    // Second fold
+    ////////////////
+    let mut prover_transcript = Transcript::new(b"StepSNARKExample");
+    let res = StepSNARK::prove(&gens, &S, &U_fold1, &W_fold1, &U3, &W3, &mut prover_transcript);
+    assert!(res.is_ok());
+    let (step_snark, (U_fold2, W_fold2)) = res.unwrap();
+
+    // verify the step SNARK
+    let mut verifier_transcript = Transcript::new(b"StepSNARKExample");
+    let res = step_snark.verify(&U_fold1, &U3, &mut verifier_transcript);
+    assert!(res.is_ok());
+    let U_verifier_fold2 = res.unwrap();
+
+    assert_eq!(U_verifier_fold2, U_fold2);
+
+    // produce a final SNARK
+    let res = FinalSNARK::prove(&W_fold2);
+    assert!(res.is_ok());
+    let final_snark = res.unwrap();
+    // verify the final SNARK
+    let res = final_snark.verify(&gens, &S, &U_verifier_fold2);
     assert!(res.is_ok());
   }
 }

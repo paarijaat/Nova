@@ -139,9 +139,12 @@ impl R1CSShape {
     assert_eq!(W.E.len(), self.num_cons);
     assert_eq!(U.X.len(), self.num_inputs);
 
-    // verify if Az * Bz = u*Cz + E
+    // verify if Az * Bz = u*Cz + E  (is z={wire_values, 1, publi_io}  or z={wire_values, u, public_io})
     let res_eq: bool = {
+                                                               // One?
       let z = concat(vec![W.W.clone(), vec![U.u], U.X.clone()]);
+      //let z = concat(vec![W.W.clone(), vec![Scalar::one()], U.X.clone()]);
+
       let (Az, Bz, Cz) = self.multiply_vec(&z)?;
       assert_eq!(Az.len(), self.num_cons);
       assert_eq!(Bz.len(), self.num_cons);
@@ -185,11 +188,13 @@ impl R1CSShape {
   ) -> Result<(Vec<Scalar>, CompressedCommitment), NovaError> {
     let (AZ_1, BZ_1, CZ_1) = {
       let Z1 = concat(vec![W1.W.clone(), vec![U1.u], U1.X.clone()]);
+      //let Z1 = concat(vec![W1.W.clone(), vec![Scalar::one()], U1.X.clone()]);
       self.multiply_vec(&Z1)?
     };
 
     let (AZ_2, BZ_2, CZ_2) = {
       let Z2 = concat(vec![W2.W.clone(), vec![U2.u], U2.X.clone()]);
+      //let Z2 = concat(vec![W2.W.clone(), vec![Scalar::one()], U2.X.clone()]);
       self.multiply_vec(&Z2)?
     };
 
